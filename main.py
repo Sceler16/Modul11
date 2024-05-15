@@ -1,78 +1,90 @@
 import os
 import sys
+import io
 import subprocess
-import serial
 from reportlab.pdfgen import canvas
-import time
+import matplotlib.pyplot as plt
 
+class VirtualSerial(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.buffer = ""
 
-# Funktion zum Einlesen der DUT-ID über die Kommandozeile
+    def write(self, data):
+        super().write(data)
+        self.buffer += data
+
+    def readline(self):
+        if self.buffer:
+            line = self.buffer
+            self.buffer = ""
+            return line
+        return ""
+
 def get_dut_id():
-    # Interaktive Aufforderung zur Eingabe der DUT-ID
     dut_id = input("Geben Sie die DUT-ID ein (z.B. BatXDev20240510): ")
-
-    # Validierung der DUT-ID (optional)
     if not dut_id:
         raise ValueError("DUT-ID darf nicht leer sein.")
-
     return dut_id
 
-# Funktion zum Starten der Testumgebung mit `testdata.py`
-def start_test_environment(dut_id):
-    # Pfad zu `testdata.py`
-    SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-    TESTDATA_PATH = os.path.join(SCRIPT_DIR, "testdata.py")
+def start_test_environment(dut_id, serial_port):
+    try:
+        serial_port.write(dut_id + "\n")
+        result = subprocess.run([sys.executable, "testdata.py", dut_id], capture_output=True, text=True)
+        response = result.stdout.strip()
+        serial_port.write(response + "\n")
+        print(f"Antwort von testdata.py: {response}")
+        if "does not exist" in response:
+            raise FileNotFoundError(response)
+    except Exception as e:
+        print(f"Fehler bei der virtuellen seriellen Kommunikation: {e}")
+        raise
 
-    # Überprüfen, ob `testdata.py` existiert
-    if not os.path.exists(TESTDATA_PATH):
-        raise FileNotFoundError(f"`testdata.py` nicht gefunden: {TESTDATA_PATH}")
-
-    # Starten von `testdata.py` mit der DUT-ID als Argument
-    subprocess.run([sys.executable, TESTDATA_PATH, dut_id], check=True)
-
-# Funktion zum Lesen von Daten über die serielle Schnittstelle
 def read_serial_data(serial_port):
-    with serial.Serial(serial_port, 9600, timeout=1) as ser:
-        data = []
-        while ser.in_waiting:
-            line = ser.readline().decode().strip()
-            data.append(line)
-        return data
+    data = []
+    try:
+        while True:
+            line = serial_port.readline().strip()
+            if line:
+                data.append(line)
+            else:
+                break
+    except Exception as e:
+        print(f"Fehler beim Lesen der seriellen Daten: {e}")
+    return data
 
-# Funktion zum Prüfen der Messdaten
 def check_measurements(data):
     voltage_range = (7.0, 10)  # Beispiel für Spannungsbereich
     current_range = (0, 20)  # Beispiel für Strombereich
 
     report = []
+    voltages = []
+    currents = []
+
     for line in data:
-        voltage, current = map(float, line.split())
-        if not (voltage_range[0] <= voltage <= voltage_range[1]):
-            report.append(f"Spannung außerhalb des Bereichs: {voltage}")
-        if not (current_range[0] <= current <= current_range[1]):
-            report.append(f"Strom außerhalb des Bereichs: {current}")
+        try:
+            voltage, current = map(float, line.split())
+            voltages.append(voltage)
+            currents.append(current)
+            if not (voltage_range[0] <= voltage <= voltage_range[1]):
+                report.append(f"Spannung außerhalb des Bereichs: {voltage}")
+            if not (current_range[0] <= current <= current_range[1]):
+                report.append(f"Strom außerhalb des Bereichs: {current}")
+        except ValueError:
+            report.append(f"Ungültige Datenzeile: {line}")
 
-    return report  # Gibt die Liste der Probleme oder einen leeren Bericht zurück
+    return report, voltages, currents
 
-# Funktion zur Erstellung eines Prüfprotokolls (PDF)
-def create_report(dut_id, report_data):
-    # Verzeichnis zum Speichern des Protokolls
-    SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))  # Verzeichnis des Skripts
-    REPORTS_DIR = os.path.join(SCRIPT_DIR, "Protokolle")  # Unterverzeichnis für Protokolle
-
-    # Erstellen des Verzeichnisses, wenn es nicht existiert
+def create_report(dut_id, report_data, voltages, currents):
+    SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+    REPORTS_DIR = os.path.join(SCRIPT_DIR, "Protokolle")
     if not os.path.exists(REPORTS_DIR):
         os.makedirs(REPORTS_DIR)
-
-    # Dateiname und Pfad für das Protokoll
     report_path = os.path.join(REPORTS_DIR, f"{dut_id}_Pruefprotokoll.pdf")
-
-    # Erstellen des PDF-Protokolls
     c = canvas.Canvas(report_path)
 
     c.drawString(100, 800, f"Prüfprotokoll für DUT-ID: {dut_id}")
     c.drawString(100, 780, "Prüfungsergebnisse:")
-    
     y_position = 760
     for item in report_data:
         c.drawString(100, y_position, item)
@@ -81,32 +93,37 @@ def create_report(dut_id, report_data):
     c.showPage()
     c.save()
 
-    print(f"Prüfprotokoll gespeichert unter: {report_path}")
+    # Plot the discharge curve
+    plt.figure()
+    plt.plot(voltages, label='Voltage (V)')
+    plt.plot(currents, label='Current (A)')
+    plt.xlabel('Measurement Points')
+    plt.ylabel('Values')
+    plt.title(f'Discharge Curve for {dut_id}')
+    plt.legend()
+    plt.grid(True)
 
-# Hauptfunktion
+    # Save plot as an image
+    plot_path = os.path.join(REPORTS_DIR, f"{dut_id}_DischargeCurve.png")
+    plt.savefig(plot_path)
+
+    print(f"Prüfprotokoll gespeichert unter: {report_path}")
+    print(f"Entladekurve gespeichert unter: {plot_path}")
+
 def main():
     try:
-        dut_id = get_dut_id()  # Eingabe der DUT-ID
-
-        # Aufruf von `testdata.py`
-        start_test_environment(dut_id)
-
-        # Lesen der Daten von der seriellen Schnittstelle
-        data = read_serial_data(serial_port)
-
+        dut_id = get_dut_id()
+        ser = VirtualSerial()
+        start_test_environment(dut_id, ser)
+        data = read_serial_data(ser)
         if not data:
             print("Keine Daten gefunden")
             return
-
-        # Prüfen der Messdaten
-        report = check_measurements(data)
-
-        # Erstellung des Prüfprotokolls
-        create_report(dut_id, report)
-
+        report, voltages, currents = check_measurements(data)
+        create_report(dut_id, report, voltages, currents)
+        
     except Exception as e:
         print(f"Fehler: {e}")
 
-# Ausführen des Hauptprogramms
 if __name__ == "__main__":
     main()
