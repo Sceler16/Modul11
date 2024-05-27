@@ -2,11 +2,12 @@ import os
 import sys
 import io
 import subprocess
+import tempfile
+from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 import matplotlib.pyplot as plt
-import tempfile
-from datetime import datetime
+
 
 class VirtualSerial(io.StringIO):
     def __init__(self):
@@ -24,87 +25,89 @@ class VirtualSerial(io.StringIO):
             return line
         return ""
 
-# DUT-ID Abfrage / Eingabe
+
 def get_dut_id():
     dut_id = input("Geben Sie die DUT-ID ein (z.B. BatXDev20240510): ")
     if not dut_id:
         raise ValueError("DUT-ID darf nicht leer sein.")
     return dut_id
 
-# Überprüfe ob Testdaten vorhanden sind
 def start_test_environment(dut_id, serial_port):
+    voltage_test_values = []
+    discharge_values = []
+
     try:
-        serial_port.write(dut_id + "\n")
+        # Sende DUT-ID an testdata.py und starte es als Subprozess
         result = subprocess.run([sys.executable, "testdata.py", dut_id], capture_output=True, text=True)
-        response = result.stdout.strip()
-        serial_port.write(response + "\n")
-        print(f"Antwort von testdata.py: {response}")
-        if "does not exist" in response:
-            raise FileNotFoundError(response)
+        response = result.stdout.strip().split('\n')  # Antwort von testdata.py erhalten
+        #print(F"Antwort: {response}")
+
+        voltage_test_started = False
+        discharge_phase_started = False
+
+        for line in response:
+            print(f"Empfangen: {line}")
+            if "Voltage Test" in line:
+                voltage_test_started = True
+            elif "Discharge Phase" in line:
+                discharge_phase_started = True
+                voltage_test_started = False
+            elif "Ende des Tests" in line:
+                discharge_phase_started = False
+
+             # Wenn der Spannungstest läuft, füge die Werte zu den entsprechenden Listen hinzu
+            if voltage_test_started and any(char.isdigit() for char in line):
+                voltage, current = map(float, line.split())
+                voltage_test_values.append((voltage, current))
+
+           # Wenn die Entladephase läuft, füge die Werte zu den entsprechenden Listen hinzu
+            if discharge_phase_started and any(char.isdigit() for char in line):
+                voltage, current = map(float, line.split())
+                discharge_values.append((voltage, current))
+
+        return voltage_test_values, discharge_values
+
     except Exception as e:
         print(f"Fehler bei der virtuellen seriellen Kommunikation: {e}")
         raise
 
-# Lesen der seriellen Schnittstelle
-def read_serial_data(serial_port):
-    data = []
-    try:
-        while True:
-            line = serial_port.readline().strip()
-            if line:
-                data.append(line)
-            else:
-                break
-    except Exception as e:
-        print(f"Fehler beim Lesen der seriellen Daten: {e}")
-    return data
 
-# Spannung und Strom überprüfen
-def check_measurements(data):
-    voltage_range = (8.0, 10)  # Spannungsbereich
-    current_range = (100, 150)  # Strombereich
+def check_measurements(voltage_test_values, discharge_values, voltage_range, current_range, capacity_limit):
+    unplausible_data = False
 
-    report = []
-    voltages = []
-    currents = []
+    # Überprüfung der Spannungswerte
+    for voltage, _ in voltage_test_values:
+        if voltage < voltage_range[0] or voltage > voltage_range[1]:
+            print("Fehler: Spannung außerhalb des spezifizierten Bereichs!")
+            unplausible_data = True
 
-    for line in data:
-        try:
-            voltage, current = map(float, line.split())
-            voltages.append(voltage)
-            currents.append(current)
-            if not (voltage_range[0] <= voltage <= voltage_range[1]):
-                report.append(f"Spannung außerhalb des Bereichs: {voltage}")
-            if not (current_range[0] <= current <= current_range[1]):
-                report.append(f"Strom außerhalb des Bereichs: {current}")
-        except ValueError:
-            report.append(f"Ungültige Datenzeile: {line}")
+    # Überprüfung der Stromwerte
+    for _, current in voltage_test_values + discharge_values:
+        if current < current_range[0] or current > current_range[1]:
+            print("Fehler: Strom außerhalb des spezifizierten Bereichs!")
+            unplausible_data = True
 
-    return report, voltages, currents
+    # Überprüfung der Kapazität
+    total_capacity = sum(voltage * current for voltage, current in discharge_values)
+    if total_capacity < capacity_limit:
+        print("Fehler: Kapazität nicht erreicht!")
+        unplausible_data = True
+
+    return unplausible_data
 
 
-# Erstellung Report
-def create_report_pdf(dut_id, report_data, voltages, currents, capacity_min, capacity_actual,
-                      voltage_threshold, voltage_actual, current_threshold, current_actual,
-                      max_voltage_threshold, max_voltage_actual, min_voltage_threshold, min_voltage_actual,
-                      additional_notes=None):
-    # Verzeichnis für Protokolle erstellen, falls nicht vorhanden
+def create_report_pdf(dut_id, voltages, currents, voltage_range, current_range, unplausible_data):
     REPORTS_DIR = "Protokolle"
     if not os.path.exists(REPORTS_DIR):
         os.makedirs(REPORTS_DIR)
 
-    # Aktuellen Zeitstempel hinzufügen
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    # Erstellen des PDFs im Protokolle-Verzeichnis mit aktuellem Zeitstempel im Dateinamen
     report_path = os.path.join(REPORTS_DIR, f"{dut_id}_Pruefprotokoll_{timestamp}.pdf")
     c = canvas.Canvas(report_path, pagesize=A4)
 
-    # Titel und DUT ID hinzufügen
     c.setFont("Helvetica-Bold", 16)
     c.drawString(100, 800, f"Prüfprotokoll für DUT-ID: {dut_id}")
 
-    # Entladekurve speichern
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
         fig, ax = plt.subplots()
         ax.plot(voltages, label='Spannung (V)')
@@ -115,31 +118,17 @@ def create_report_pdf(dut_id, report_data, voltages, currents, capacity_min, cap
         ax.legend()
         ax.grid(True)
         fig.savefig(temp_file.name)
-
-        # Entladekurve zum PDF hinzufügen
         c.drawImage(temp_file.name, 100, 250, width=400, height=300)
 
-    # Testergebnisse hinzufügen
     y_position = 700
     c.setFont("Helvetica", 12)
     c.drawString(100, y_position, "Testergebnisse:")
     y_position -= 20
 
-    # Zusätzliche Hinweise hinzufügen, falls vorhanden
-    if additional_notes:
-        c.drawString(100, y_position, "Zusätzliche Hinweise:")
-        y_position -= 20
-        for note in additional_notes:
-            c.drawString(120, y_position, note)
-            y_position -= 20
-
-    # Testergebnisse hinzufügen
     test_results = [
-        (f"Mindestkapazität: {capacity_min} mAh, Ist-Kapazität: {capacity_actual} mAh", "Bestanden" if capacity_actual >= capacity_min else "Nicht bestanden"),
-        (f"Grenzwert Leerlaufspannung: {voltage_threshold} V, Ist-Wert: {voltage_actual} V", "Bestanden" if voltage_actual >= voltage_threshold else "Nicht bestanden"),
-        (f"Grenzwert Leerlaufstrom: {current_threshold} A, Ist-Wert: {current_actual} A", "Bestanden" if current_actual <= current_threshold else "Nicht bestanden"),
-        (f"Maximale Entladespannung: {max_voltage_threshold} V, Ist-Wert: {max_voltage_actual} V", "Bestanden" if max_voltage_actual <= max_voltage_threshold else "Nicht bestanden"),
-        (f"Minimale Entladespannung: {min_voltage_threshold} V, Ist-Wert: {min_voltage_actual} V", "Bestanden" if min_voltage_actual >= min_voltage_threshold else "Nicht bestanden")
+        (f"Grenzwerte Spannung: {voltage_range} V", "Überprüft"),
+        (f"Grenzwerte Strom: {current_range} mA", "Überprüft"),
+        ("Unplausible Daten vorhanden" if unplausible_data else "Keine unplausiblen Daten gefunden", "Überprüft")
     ]
 
     for result, status in test_results:
@@ -147,43 +136,35 @@ def create_report_pdf(dut_id, report_data, voltages, currents, capacity_min, cap
         c.drawString(400, y_position, status)
         y_position -= 20
 
-    # PDF speichern und schließen
+    c.drawString(100, y_position - 20, "Freigabe:")
+    c.line(150, y_position - 20, 300, y_position - 20)
+
     c.showPage()
     c.save()
-
     print(f"Prüfprotokoll gespeichert unter: {report_path}")
+
 
 def main():
     try:
         dut_id = get_dut_id()
         ser = VirtualSerial()
-        start_test_environment(dut_id, ser)
-        data = read_serial_data(ser)
-        if not data:
-            print("Keine Daten gefunden")
-            return
-        report, voltages, currents = check_measurements(data)
+        voltage_test_values, discharge_values = start_test_environment(dut_id, ser)
 
-# Zusätzliche Informationen für das Prüfprotokoll
-        capacity_min = 1000  # Beispiel für Mindestkapazität in mAh
-        capacity_actual = 950  # Beispiel für gemessene Kapazität in mAh
-        voltage_threshold = 9  # Beispiel für Schwellenwert der Leerlaufspannung in V
-        voltage_actual = 8.8  # Beispiel für gemessene Leerlaufspannung in V
-        current_threshold = 15  # Beispiel für Schwellenwert des Leerlaufstroms in A
-        current_actual = 10  # Beispiel für gemessenen Leerlaufstrom in A
-        max_voltage_threshold = 8.5  # Beispiel für maximal zulässige Entladespannung in V
-        max_voltage_actual = 6.5  # Beispiel für gemessene maximale Entladespannung in V
-        min_voltage_threshold = 6  # Beispiel für minimal zulässige Entladespannung in V
-        min_voltage_actual = 5.5  # Beispiel für gemessene minimale Entladespannung in V
-        additional_notes = ["Unplausibler Anstieg der Spannung"]
+        # Definieren Sie die Bereichsgrenzen und Kapazitätsschwelle
+        voltage_range = (6.0, 9.0)
+        current_range = (100, 150.0)
+        capacity_limit = 2000
 
-        create_report_pdf(dut_id, report, voltages, currents, capacity_min, capacity_actual,
-                          voltage_threshold, voltage_actual, current_threshold, current_actual,
-                          max_voltage_threshold, max_voltage_actual, min_voltage_threshold, min_voltage_actual,
-                          additional_notes)
+        # Überprüfen der Messwerte
+        unplausible_data = check_measurements(voltage_test_values, discharge_values, voltage_range, current_range, capacity_limit)
+
+        # Erstellen des Prüfprotokolls
+        create_report_pdf(dut_id, [voltage for voltage, _ in discharge_values], 
+                          [current for _, current in discharge_values], voltage_range, current_range, unplausible_data)
 
     except Exception as e:
         print(f"Fehler: {e}")
+
 
 if __name__ == "__main__":
     main()
