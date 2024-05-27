@@ -72,31 +72,35 @@ def start_test_environment(dut_id, serial_port):
         raise
 
 
-def check_measurements(voltage_test_values, discharge_values, voltage_range, current_range, capacity_limit):
+def check_measurements(voltage_test_values, discharge_values, min_voltage_range_test, max_voltage_range_test, min_current_range_test, max_current_range_test, min_voltage_range_discharge, max_voltage_range_discharge, min_current_range_discharge, max_current_range_discharge):
     unplausible_data = False
 
-    # Überprüfung der Spannungswerte
-    for voltage, _ in voltage_test_values:
-        if voltage < voltage_range[0] or voltage > voltage_range[1]:
-            print("Fehler: Spannung außerhalb des spezifizierten Bereichs!")
+    # Check idle voltage
+    for voltage in voltage_test_values:
+        if not (min_voltage_range_test <= voltage <= max_voltage_range_test):
             unplausible_data = True
+            break
 
-    # Überprüfung der Stromwerte
-    for _, current in voltage_test_values + discharge_values:
-        if current < current_range[0] or current > current_range[1]:
-            print("Fehler: Strom außerhalb des spezifizierten Bereichs!")
+    # Check idle current
+    for _, current in discharge_values:
+        if not (min_current_range_test <= current <= max_current_range_test):
             unplausible_data = True
+            break
 
-    # Überprüfung der Kapazität
-    total_capacity = sum(voltage * current for voltage, current in discharge_values)
-    if total_capacity < capacity_limit:
-        print("Fehler: Kapazität nicht erreicht!")
+    # Max. discharge voltage
+    max_discharge_voltage = max(voltage for voltage, _ in discharge_values)
+    if not (min_voltage_range_discharge <= max_discharge_voltage <= max_voltage_range_discharge):
+        unplausible_data = True
+
+    # Min. discharge current
+    min_discharge_current = min(current for _, current in discharge_values)
+    if not (min_current_range_discharge <= min_discharge_current <= max_current_range_discharge):
         unplausible_data = True
 
     return unplausible_data
 
 
-def create_report_pdf(dut_id, voltages, currents, voltage_range, current_range, unplausible_data):
+#def create_report_pdf(dut_id, voltages, currents, voltage_range, current_range, unplausible_data):
     REPORTS_DIR = "Protokolle"
     if not os.path.exists(REPORTS_DIR):
         os.makedirs(REPORTS_DIR)
@@ -151,16 +155,21 @@ def main():
         voltage_test_values, discharge_values = start_test_environment(dut_id, ser)
 
         # Definieren Sie die Bereichsgrenzen und Kapazitätsschwelle
-        voltage_range = (6.0, 9.0)
-        current_range = (100, 150.0)
-        capacity_limit = 2000
+        min_voltage_range_test = 8.0
+        max_voltage_range_test = 10
+        min_current_range_test = 0
+        max_current_range_test = 1
+        min_voltage_range_discharge = 5.8
+        max_voltage_range_discharge = 10.0
+        min_current_range_discharge = 100.0
+        max_current_range_discharge = 150.0
 
         # Überprüfen der Messwerte
-        unplausible_data = check_measurements(voltage_test_values, discharge_values, voltage_range, current_range, capacity_limit)
+        unplausible_data = check_measurements(voltage_test_values, discharge_values, min_voltage_range_test, max_voltage_range_test, min_current_range_test, max_current_range_test, min_voltage_range_discharge, max_voltage_range_discharge, min_current_range_discharge, max_current_range_discharge)
 
         # Erstellen des Prüfprotokolls
-        create_report_pdf(dut_id, [voltage for voltage, _ in discharge_values], 
-                          [current for _, current in discharge_values], voltage_range, current_range, unplausible_data)
+        #create_report_pdf(dut_id, [voltage for voltage, _ in discharge_values], 
+        #                [current for _, current in discharge_values], voltage_range, current_range, unplausible_data)
 
     except Exception as e:
         print(f"Fehler: {e}")
