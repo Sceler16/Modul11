@@ -40,7 +40,7 @@ def voltage_test(dut_id, serial_port):
     pretest_data = read_test_data(dut_id)[0]  # Erste Zeile
     print(pretest_data)
     serial_port.write(pretest_data + "\n")
-    time.sleep(0.1)
+    time.sleep(0.01)
 
 # Lese 2. und folgende Zeilen für Discharge Test
 def discharge_phase(dut_id, serial_port):
@@ -49,7 +49,7 @@ def discharge_phase(dut_id, serial_port):
     for data in discharge_data:
         print(data)
         serial_port.write(data + "\n")
-        time.sleep(0.1)  # Simuliere 1 Sekunde Pause zwischen den Messungen
+        time.sleep(0.01)  # Simuliere 0,01 Sekunde Pause zwischen den Messungen
     
 
 def main():
