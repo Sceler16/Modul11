@@ -55,7 +55,7 @@ def start_test_environment(dut_id, serial_port):
             elif "Ende des Tests" in line:
                 discharge_phase_started = False
 
-             # Wenn der Spannungstest läuft, füge die Werte zu den entsprechenden Listen hinzu
+            # Wenn der Spannungstest läuft, füge die Werte zu den entsprechenden Listen hinzu
             if voltage_test_started and any(char.isdigit() for char in line):
                 voltage, current = map(float, line.split())
                 voltage_test_values.append((voltage, current))
@@ -74,7 +74,7 @@ def start_test_environment(dut_id, serial_port):
 
 def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage_test, max_voltage_test, min_current_test, 
                       max_current_test, min_voltage_discharge, max_voltage_discharge, min_current_discharge, 
-                      max_current_discharge):
+                      max_current_discharge,min_cap):
     REPORTS_DIR = "Protokolle"
     if not os.path.exists(REPORTS_DIR):
         os.makedirs(REPORTS_DIR)
@@ -107,8 +107,8 @@ def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage
    
         # Zweite y-Achse für den Strom
         ax2 = ax.twinx()
-        ax2.plot([i for i in range(len(combined_values))], [c for _, c in combined_values], color='tab:orange', label='Strom (A)')
-        ax2.set_ylabel('Strom (A)')
+        ax2.plot([i for i in range(len(combined_values))], [c for _, c in combined_values], color='tab:orange', label='Strom (mA)')
+        ax2.set_ylabel('Strom (mA)')
         ax2.set_ylim(min_current_discharge, max_current_discharge)
         
         # Legenden hinzufügen
@@ -122,7 +122,7 @@ def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage
      
         fig.tight_layout()
         fig.savefig(temp_file.name)
-        c.drawImage(temp_file.name, 50, 450, width=480, height=290)
+        c.drawImage(temp_file.name, 50, 460, width=450, height=270)
 
     # Funktion zum Zeichnen von Text mit Farben
     def draw_colored_text(c, text, x, y, color):
@@ -133,7 +133,23 @@ def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage
     # Abstand des Ist-Werts von den Seitenrändern
     actual_value_offset = 80
 
-    # Grenzwerte Leerlaufspannung
+    # Grenzwert für Kapazität
+    discharge_capacity = sum(current for _, current in discharge_values)
+    current_capacity = discharge_capacity * (8/3600)
+    
+    cap_result = "pass" if current_capacity >= min_cap else "fail"
+    cap_result_color = "green" if cap_result == "pass" else "red"
+    
+    cap_test_str = "Mindestkapazität: 500 mAh (1,5% Toleranz)"
+    cap_actual_str = f"Ist-Kapazität : {current_capacity:.2f} mAh"
+    cap_result_str = f"Result: {cap_result}"
+
+    c.setFont("Helvetica", 10)
+    c.drawString (50, 450, cap_test_str)
+    c.drawString (page_width / 2 - c.stringWidth(cap_actual_str) / 2 + actual_value_offset, 450, cap_actual_str)
+    draw_colored_text(c, cap_result_str, page_width - 50 - c.stringWidth(cap_result_str), 450, cap_result_color)
+
+    # Grenzwerte Leerlaufspannung   
     voltage_test_result = "pass" if min_voltage_test <= voltage_test_values[0][0] <= max_voltage_test else "fail"
     voltage_result_color = "green" if voltage_test_result == "pass" else "red"
     voltage_test_str = f"Grenzwerte Leerlaufspannung: {min_voltage_test} - {max_voltage_test} V"
@@ -148,8 +164,8 @@ def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage
     # Grenzwert Leerlaufstrom
     current_test_result = "pass" if min_current_test <= voltage_test_values[0][1] <= max_current_test else "fail"
     current_result_color = "green" if current_test_result == "pass" else "red"
-    current_test_str = f"Grenzwert Leerlaufstrom: {min_current_test} - {max_current_test} A"
-    current_actual_str = f"Ist-Wert: {voltage_test_values[0][1]:.2f} A"
+    current_test_str = f"Grenzwert Leerlaufstrom: {min_current_test} - {max_current_test} mA"
+    current_actual_str = f"Ist-Wert: {voltage_test_values[0][1]:.2f} mA"
     current_result_str = f"Result: {current_test_result}"
 
     c.drawString(50, 410, current_test_str)
@@ -181,9 +197,16 @@ def create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage
     draw_colored_text(c, min_discharge_result_str, page_width - 50 - c.stringWidth(min_discharge_result_str), 370, min_discharge_result_color)
 
     # Freigegeben am und Unterschrift
-    c.drawString(50, 310, f"Freigegeben am: {datetime.now().strftime('%d.%m.%Y')}")
-    c.drawString(50, 260, "Unterschrift:")
-    c.line(120, 260, 250, 260)
+    c.drawString(50, 250, f"Geprüft am: {datetime.now().strftime('%d.%m.%Y')}")
+    c.drawString(50, 220, "Geprüft von:")
+    c.line(120, 220, 300, 220)
+    c.drawString(150, 205, "(Name / Unterschrift)")
+
+
+    c.drawString(50, 130, f"Freigegeben am: {datetime.now().strftime('%d.%m.%Y')}")
+    c.drawString(50, 100, "Freigegeben von:")
+    c.line(130, 100, 300, 100)
+    c.drawString(150, 85, "(Name / Unterschrift)")
 
     c.save()
     print(f"Prüfprotokoll gespeichert unter: {report_path}")
@@ -203,11 +226,12 @@ def main():
         max_voltage_discharge = 10.0
         min_current_discharge = 100.0
         max_current_discharge = 150.0
+        min_cap = 492.5 # 1,5%
 
         # Erstellen des Prüfprotokolls
         create_report_pdf(dut_id, voltage_test_values, discharge_values, min_voltage_test, max_voltage_test, min_current_test, 
                               max_current_test, min_voltage_discharge, max_voltage_discharge, min_current_discharge, 
-                              max_current_discharge)
+                              max_current_discharge, min_cap)
 
     except Exception as e:
         print(f"Fehler: {e}")
